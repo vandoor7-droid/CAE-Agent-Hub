@@ -122,6 +122,10 @@ fieldRanges / fieldLabel / deformationScale / timeMs
   后 188 ms（3.5×），面数完全一致（16,226）。
 - `peridigm.html` 原本的校验只接受材料点结果（`representation === "material-points"` 且不允许 `elements`），
   有限元结果会被拒；放开该限制后即可直接显示 ccx 的 FE 网格。
+- **变形倍数默认 1:1（`deformationScale = 1`）**。超声场的位移只有 1e-5 mm 量级，柱高 300 mm，
+  真实比例下肉眼看不到形变；把它放大会让柱子上的网格看起来像刺猬，容易被误读成真实几何。
+  因此 `viewer_case.py` 默认不放大，需要示意图时才显式加 `--auto-scale`（让最大位移占对角线 6%）
+  或 `--deformation-scale N`，并在图注里写明倍数。色标与 `mises` 字段与倍数无关。
 
 导出命令：
 
