@@ -16,6 +16,7 @@ MCP/CalculiX/            CalculiX MCP server (FastMCP), tools, examples, tests
 Skill/calculix/          workflow skill: inspect → modify → solve → read → export
 docs/                    engineering notes
 patches/viewer-fe-mesh/  viewer changes for FE results + a reproducible benchmark
+migration/               ultrasonic TOF migration scripts (results stay local)
 ```
 
 ## What is different from upstream

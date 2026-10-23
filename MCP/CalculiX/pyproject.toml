@@ -7,6 +7,10 @@ dependencies = [
     # mcp 2.0 removed `mcp.server.fastmcp` (the FastMCP we use, same import as the
     # repo's COMSOL/LAMMPS MCPs). Pin below 1.8 to keep that import path.
     "mcp>=1.0,<1.8",
+    # mcp<1.8 imports pydantic._internal._typing_extra.eval_type_backport, which
+    # pydantic 2.12 deleted; without this pin a fresh `pip install -e .` installs
+    # pydantic 2.14 and the server dies on import.
+    "pydantic<2.12",
     "meshio>=5.3",
     "numpy>=1.26",
     "python-dotenv>=1.0,<2",

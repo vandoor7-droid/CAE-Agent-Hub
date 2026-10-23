@@ -1,0 +1,29 @@
+# 个人周总结归档（本地，不进版本库）
+每周总结/
+每周总结_*/
+*.zip
+
+# 运行结果与算例中间文件（只在本地，仓库只放代码/文档）
+migration/results/
+*.frd
+*.dat
+*.rout
+*.rin
+*.sta
+*.cvg
+*.12d
+*.stdout
+*.done
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# 本地配置与工具（路径含本机信息，不入库）
+.dsh/
+.local/
+.claude/
+
+# 系统文件
+Thumbs.db
+desktop.ini
+~$*
