@@ -11,7 +11,9 @@ The hub viewer's FE page colours elements with the per-element ``mises`` field;
 for a transient run the meaningful scalar is the displacement magnitude, so the
 field is filled with the nodal mean of |u| and the legend is relabelled through
 ``fieldLabel``.  Nothing is invented: colours are |u| and the deformation shown
-is ``scale * u`` with a scale chosen so the picture is visible.
+is ``scale * u`` with ``scale = 1`` (true scale) by default. Pass
+``--auto-scale`` (max |u| spans 6% of the model diagonal) or
+``--deformation-scale N`` when an exaggerated view is wanted for a figure.
 
     python viewer_case.py --inp run.inp --frd run.frd --out-dir case/
 
@@ -120,6 +122,10 @@ def main() -> int:
     ap.add_argument("--field-label", default="U, Magnitude (mm)")
     ap.add_argument("--dt", default="", help="optional time increment, recorded in cae_project.json")
     ap.add_argument("--time", default="", help="optional total time, recorded in cae_project.json")
+    ap.add_argument("--deformation-scale", type=float, default=None,
+                    help="explicit displacement magnification; default 1.0 (true scale)")
+    ap.add_argument("--auto-scale", action="store_true",
+                    help="legacy convenience: scale so max |u| spans 6%% of the model diagonal")
     ap.add_argument("--with-deformed", action="store_true",
                     help="also write the redundant deformed array (the viewer recomputes it)")
     args = ap.parse_args()
@@ -151,7 +157,15 @@ def main() -> int:
     ys = [nodes[n][1] for n in nodes]
     zs = [nodes[n][2] for n in nodes]
     diag = math.dist((min(xs), min(ys), min(zs)), (max(xs), max(ys), max(zs)))
-    scale = (0.06 * diag / umax) if umax > 0 else 1.0
+    # True scale by default: a transient run's displacement is tiny compared with
+    # the model, so magnifying it silently (the old 0.06*diag/umax rule) makes the
+    # picture look like a different structure. Ask for --auto-scale explicitly.
+    if args.deformation_scale is not None:
+        scale = float(args.deformation_scale)
+    elif args.auto_scale:
+        scale = (0.06 * diag / umax) if umax > 0 else 1.0
+    else:
+        scale = 1.0
 
     node_list = []
     for label, (x, y, z) in nodes.items():
@@ -197,7 +211,8 @@ def main() -> int:
           f"frame #{idx + 1}/{len(frames)} t={t:.3e} s  scale={scale:.1f}  "
           f"|u| {vmin:.2e}..{vmax:.2e}")
 
-    settings = {"field": "U", "deformation_scale": round(scale, 1), "frame": idx + 1}
+    settings = {"field": "U", "deformation_scale": round(scale, 6),
+                "magnified": abs(scale - 1.0) > 1e-9, "frame": idx + 1}
     if args.dt:
         settings["dt_s"] = float(args.dt)
     if args.time:
