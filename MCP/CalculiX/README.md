@@ -1,0 +1,182 @@
+# CalculiX MCP
+
+An MCP server that exposes the open-source **CalculiX** FEM solver (`ccx`) to MCP
+clients. CalculiX is GPLv2, needs no license, and runs as a fire-and-forget CLI —
+so this server is fully self-contained, with no live-session bridge and no license
+state machine.
+
+The workflow is: parse a CalculiX/Abaqus `.inp` deck, inspect its tunable design
+variables, edit a value in place, submit it to `ccx`, read the text results
+(`.dat`), and export those `.dat` results to `result_mesh.json` so the
+repo's [Text to CAE Viewer](../../viewer) can render the mesh and stress field.
+
+This is the first open-source-solver FEM MCP in the hub (the existing FEA line
+stopped at FEniCS references), filling the gap noted in Issue #14.
+
+## Tools
+
+| Tool | Purpose |
+| --- | --- |
+| `fea_health` | Report meshio availability and the detected `ccx` executable. |
+| `parse_inp` | Parse a `.inp` deck: nodes, element counts, shell/beam sections, materials, loads. |
+| `list_design_vars_tool` | List tunable design variables (shell thickness, beam section, material E/nu/density, load magnitude), each with a `var_id` locator. |
+| `modify_card_tool` | Edit one design variable in place by `var_id`; pure-text replacement, writes a new `.inp`. |
+| `run_solver_tool` | Run `ccx -i <jobname>` on a deck. Success ignores the exit code (see below). |
+| `read_results_tool` | Parse the `.dat` for max von Mises (self-computed), max displacement, volume, mass; for `*FREQUENCY` steps also the eigenvalue table (`frequencies`, `n_modes`). |
+| `export_results_tool` | Export the run to `result_mesh.json` (viewer format); for modal runs pass `mode=N` to export that mode's shape. |
+| `optimize_structure_tool` | Two-stage sizing optimization (LHS sweep + coordinate descent): minimize mass subject to stress/displacement bounds (static decks) or a natural-frequency floor (modal decks, "avoid resonance") by tuning scalar design variables (shell thickness, beam section, material, load). Shell/beam models only — see [Optimization](#optimization). |
+
+## Hard-won CalculiX contracts (encoded in the solver)
+
+These are why this server is non-trivial — all from public CalculiX behaviour:
+
+- **ccx exit code is untrusted** — `ccx` returns 0 even when it prints `*ERROR`.
+  Success = no `*ERROR` in stdout **and** the `.sta` file has a data row **and**
+  no timeout.
+- **`.dat` has no von Mises** — only 6 stress components; σ_vm is self-computed.
+- **`.dat` has no total volume/mass** — computed from the mesh geometry × `*DENSITY`.
+- **Never `meshio.write`** — it drops every card and rewrites `B31`→`B31H`
+  (corrupts the file). `modify_card` does pure-text in-place edits instead.
+- **`*FREQUENCY` steps write a header-only `.sta`** — an eigenvalue solve has
+  no increments, so success also accepts a non-empty `.dat` (otherwise every
+  modal run would look failed). Frequencies and per-mode eigenvectors are in
+  the `.dat` text, not only the `.frd`.
+
+## Optimization
+
+`optimize_structure_tool` runs two-stage **sizing** optimization: a Latin
+Hypercube coarse sweep, then coordinate-descent refinement (jump-to-bound plus
+repeated bisection toward the feasible boundary), minimizing mass subject to
+stress and displacement constraints by editing scalar cards in place.
+
+```python
+optimize_structure_tool(
+    path="examples/bracket.inp",
+    variables={"shell.PLATE.thickness": [2.0, 8.0]},
+    n_lhs=8, max_solves=18,
+)
+# -> best ~4.1 mm, ~-48% mass, stress < 250 MPa, displacement < 1.5 mm
+```
+
+Frequency constraints ("avoid resonance") run the same loop against a
+`*FREQUENCY` deck: each evaluation is an eigen solve, mode N is read from the
+`.dat` eigenvalue table, and thinning stops where the mode sits just above its
+floor. Static metrics and frequency metrics come from static and modal decks
+respectively — a mismatched constraint set makes every point infeasible, which
+the run reports as a missing-metrics warning.
+
+```python
+optimize_structure_tool(
+    path="examples/plate_modal.inp",
+    variables={"shell.PLATE.thickness": [2.0, 8.0]},
+    constraints=[{"metric": "freq_1_hz", "op": ">", "value": 30.0}],
+    n_lhs=5, max_solves=24,
+)
+# -> best ~3.23 mm, ~-19% mass, f1 = 30.4 Hz
+```
+
+Scope and honesty:
+
+- **Shell/beam models only.** Solids (C3D8) expose no scalar geometry card, so
+  there is no thickness to thin; use shape/topology optimization instead.
+- This is **sizing/parameter optimization, not topology optimization** — it
+  thins sections, it does not redistribute material in space.
+- The best deck is written next to the input as `<stem>.optimized.inp`; pass it
+  to `export_results_tool` to render the optimized design.
+
+## Modal analysis
+
+`*FREQUENCY` decks work with the same tools. The `.dat` carries everything: an
+`E I G E N V A L U E   O U T P U T` table (mode, eigenvalue, rad/s, cycles/s)
+followed by per-mode eigenvector blocks marked
+`E I G E N V A L U E    N U M B E R     N` — the vectors reuse the static
+`displacements (vx,vy,vz)` row format, so mode shapes export without touching
+the `.frd`.
+
+```python
+read_results_tool(result_path=...)     # -> frequencies: [{mode, eigenvalue,
+                                       #     freq_rad_s, freq_hz}], n_modes
+export_results_tool(path="examples/cantilever_modal.inp", mode=1)
+# -> result_mesh.json holding mode 1's eigenvector (stress-free shape)
+```
+
+Two physics notes worth reporting honestly: a doubly symmetric section gives
+degenerate pairs (f1 = f2), and fully-integrated C3D8 hexes shear-lock in
+bending, so frequencies run ~5-10% above the Euler-Bernoulli hand calc
+(`examples/cantilever_modal.inp`: ccx f1 ~ 502 Hz vs hand calc ~ 464 Hz).
+
+## Install
+
+From this directory (Linux/macOS; adapt the venv activation on Windows):
+
+```bash
+uv venv .venv --python 3.11
+uv pip install --python .venv/bin/python "mcp>=1.0,<1.8" meshio numpy "python-dotenv>=1,<2"
+uv pip install --python .venv/bin/python pytest   # dev only
+```
+
+> `mcp` is pinned below 1.8: `mcp` 2.0 removed `mcp.server.fastmcp` (the FastMCP
+> import used here and by the hub's other MCPs).
+
+Install CalculiX separately (e.g. `ccx` or `ccx_preCICE` on your PATH, or set
+`CCX_EXE`). `fea_health` will tell you whether the executable was detected.
+
+## Run
+
+```bash
+.venv/bin/python mcp_server.py          # stdio MCP transport
+```
+
+Register it with an MCP client using `examples/mcp_config.example.json`.
+
+## Example: cantilever benchmark
+
+`examples/cantilever.inp` is a **public textbook cantilever** (steel C3D8 solid
+bar, clamped at one end, transversely loaded at the other). Regenerate it with:
+
+```bash
+python3 examples/gen_cantilever.py
+```
+
+Hand-calc sanity targets (Euler-Bernoulli, mm-t-s-MPa, P = 100 N): tip deflection
+≈ 0.8 mm, root stress ≈ 140 MPa. The viewer auto-magnifies the small elastic
+deformation for display.
+
+`examples/cantilever_modal.inp` is the same bar with a 5-mode `*FREQUENCY`
+step: f1 = f2 ≈ 502 Hz (degenerate pair), f3 = f4 ≈ 3089 Hz, f5 ≈ 6309 Hz,
+vs the hand calc f1 ≈ 464 Hz (C3D8 shear locking). The viewer case
+`models/text-to-cae-calculix-modal` renders mode 1.
+
+`examples/plate_modal.inp` (regenerate with
+`python3 examples/gen_plate_modal.py`) is an S4 shell cantilever plate built
+for frequency-constrained sizing: ccx f1 = 37.6 Hz at t = 4 mm vs the
+Euler-Bernoulli hand calc f1 = (1.8751²/2π)(t/L²)√(E/12ρ) ≈ 37.1 Hz, and the
+avoid-resonance run above lands at t = 3.23 mm against the analytic optimum
+t* = 30/9.29 ≈ 3.23 mm.
+
+## Tests
+
+```bash
+.venv/bin/python -m pytest
+```
+
+Parser and exporter tests run without a solver. Solver tests are skipped
+automatically when `ccx` is not detected, so the suite stays green before
+CalculiX is installed.
+
+## Contents
+
+- `mcp_server.py` — FastMCP stdio server.
+- `tools/inp_parser.py` — `.inp` card parsing + text in-place editing.
+- `tools/solver.py` — `ccx` subprocess + `.dat` result parsing.
+- `tools/result_exporter.py` — `.dat`/`.inp` → `result_mesh.json` (viewer format).
+- `tools/optimizer.py` — two-stage sizing optimization (LHS + coordinate descent).
+- `examples/` — public cantilever benchmark + generator + MCP config example.
+- `tests/` — pytest suite.
+
+## Repository rules
+
+Commit only reusable source, examples (public benchmarks), tests, and docs. Do
+not commit the virtual environment, `.env`, or any generated solver output
+(`.frd`, `.dat`, `.sta`, `.cvg`, job directories). Input `.inp` decks are source
+and are committed.

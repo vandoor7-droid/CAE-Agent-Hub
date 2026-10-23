@@ -1,0 +1,344 @@
+--- a/viewer/components/CaeResultViewer.js
++++ b/viewer/components/CaeResultViewer.js
+@@ -125,6 +125,31 @@
+   return [...labels].sort((a, b) => a - b).join(":");
+ }
+ 
++// A mesh may ship without the redundant `deformed` array; rebuild it on demand
++// from coordinates + deformationScale * displacement.
++function displacedPointOf(node, scale) {
++  if (!node) {
++    return null;
++  }
++  if (Array.isArray(node.deformed)) {
++    return node.deformed;
++  }
++  const coordinates = node.coordinates;
++  if (!Array.isArray(coordinates)) {
++    return null;
++  }
++  const displacement = node.displacement;
++  if (!Array.isArray(displacement)) {
++    return coordinates;
++  }
++  const factor = Number.isFinite(scale) ? scale : 1;
++  return [
++    toFiniteNumber(coordinates[0], 0) + factor * toFiniteNumber(displacement[0], 0),
++    toFiniteNumber(coordinates[1], 0) + factor * toFiniteNumber(displacement[1], 0),
++    toFiniteNumber(coordinates[2], 0) + factor * toFiniteNumber(displacement[2], 0),
++  ];
++}
++
+ function getElementFaceNodeIndices(element) {
+   const elementType = String(element?.type || "").toUpperCase();
+   if (elementType.startsWith("C3D4") || elementType.startsWith("C3D10")) {
+@@ -206,29 +231,113 @@
+   }
+   const nodes = Array.isArray(mesh?.nodes) ? mesh.nodes : [];
+   const elements = Array.isArray(mesh?.elements) ? mesh.elements : [];
+-  const nodeByLabel = new Map(nodes.map((node) => [Number(node.label), node]));
+-  const faces = new Map();
++  const nodeByLabel = new Map();
++  for (const node of nodes) {
++    nodeByLabel.set(Number(node.label), node);
++  }
++
++  // When the exporter omits the redundant `deformed` array, rebuild it here from
++  // coordinates + deformationScale * displacement. That keeps the transport
++  // payload about a third smaller for large meshes.
++  const deformationScale = toFiniteNumber(mesh?.deformationScale, 1);
++  const pointOf = (node) => {
++    if (!node) {
++      return null;
++    }
++    if (Array.isArray(node.deformed)) {
++      return node.deformed;
++    }
++    const coordinates = node.coordinates;
++    const displacement = node.displacement;
++    if (Array.isArray(coordinates) && Array.isArray(displacement)) {
++      return [
++        toFiniteNumber(coordinates[0], 0) + deformationScale * toFiniteNumber(displacement[0], 0),
++        toFiniteNumber(coordinates[1], 0) + deformationScale * toFiniteNumber(displacement[1], 0),
++        toFiniteNumber(coordinates[2], 0) + deformationScale * toFiniteNumber(displacement[2], 0),
++      ];
++    }
++    return coordinates;
++  };
++
++  // Interior-face removal without string keys: bucket the sorted node labels by
++  // their smallest label, so a repeated face collides with at most a handful of
++  // candidates (a hexahedral vertex touches at most eight elements).
++  const faceBuckets = new Map();
++  const sortIds = (ids) => {
++    const size = ids.length;
++    for (let i = 1; i < size; i += 1) {
++      const value = ids[i];
++      let j = i - 1;
++      while (j >= 0 && ids[j] > value) {
++        ids[j + 1] = ids[j];
++        j -= 1;
++      }
++      ids[j + 1] = value;
++    }
++    return ids;
++  };
++  const sameIds = (a, b) => {
++    if (a.length !== b.length) {
++      return false;
++    }
++    for (let i = 0; i < a.length; i += 1) {
++      if (a[i] !== b[i]) {
++        return false;
++      }
++    }
++    return true;
++  };
++  const facePatternCache = new Map();
+ 
+   for (const element of elements) {
+-    const connectivity = Array.isArray(element?.connectivity) ? element.connectivity.map(Number) : [];
+-    const faceNodeIndices = getElementFaceNodeIndices(element);
+-    const requiredNodeCount = Math.max(...faceNodeIndices.flat()) + 1;
+-    if (connectivity.length < requiredNodeCount) {
++    const connectivity = Array.isArray(element?.connectivity) ? element.connectivity : null;
++    if (!connectivity) {
+       continue;
+     }
+-    for (const faceIndices of faceNodeIndices) {
+-      const labels = faceIndices.map((index) => connectivity[index]);
+-      const key = faceKey(labels);
+-      if (faces.has(key)) {
+-        faces.delete(key);
++    const elementType = String(element?.type || "HEX").toUpperCase();
++    let patterns = facePatternCache.get(elementType);
++    if (!patterns) {
++      patterns = getElementFaceNodeIndices(element);
++      facePatternCache.set(elementType, patterns);
++    }
++    const mises = toFiniteNumber(element.mises, 0);
++    const color = element.color || "";
++    const showEdges = element.showEdges !== false;
++    for (const faceIndices of patterns) {
++      const ids = new Array(faceIndices.length);
++      let valid = true;
++      for (let i = 0; i < faceIndices.length; i += 1) {
++        const label = Number(connectivity[faceIndices[i]]);
++        if (!Number.isFinite(label)) {
++          valid = false;
++          break;
++        }
++        ids[i] = label;
++      }
++      if (!valid) {
++        continue;
++      }
++      sortIds(ids);
++      let bucket = faceBuckets.get(ids[0]);
++      if (!bucket) {
++        bucket = [];
++        faceBuckets.set(ids[0], bucket);
++      }
++      let found = -1;
++      for (let i = 0; i < bucket.length; i += 1) {
++        if (sameIds(bucket[i].ids, ids)) {
++          found = i;
++          break;
++        }
++      }
++      if (found >= 0) {
++        bucket.splice(found, 1);
++        if (bucket.length === 0) {
++          faceBuckets.delete(ids[0]);
++        }
+         continue;
+       }
+-      faces.set(key, {
+-        labels,
+-        mises: toFiniteNumber(element.mises, 0),
+-        color: element.color || "",
+-        showEdges: element.showEdges !== false,
+-      });
++      bucket.push({ ids, mises, color, showEdges });
+     }
+   }
+ 
+@@ -240,51 +349,60 @@
+   const colors = [];
+   const indices = [];
+   const linePositions = [];
+-  const linePairs = new Set();
++  const edgeBuckets = new Map();
+   const bounds = new THREE.Box3();
++  const probe = new THREE.Vector3();
++  let surfaceFaceCount = 0;
+ 
+-  for (const face of faces.values()) {
+-    const baseIndex = positions.length / 3;
+-    const ratio = (face.mises - minMises) / range;
+-    const color = face.color ? new THREE.Color(face.color) : colorForRatio(ratio);
+-    const facePoints = [];
+-    for (const label of face.labels) {
+-      const node = nodeByLabel.get(label);
+-      const point = Array.isArray(node?.deformed) ? node.deformed : node?.coordinates;
+-      const x = toFiniteNumber(point?.[0], 0);
+-      const y = toFiniteNumber(point?.[1], 0);
+-      const z = toFiniteNumber(point?.[2], 0);
+-      facePoints.push([x, y, z]);
+-      positions.push(x, y, z);
+-      colors.push(color.r, color.g, color.b);
+-      bounds.expandByPoint(new THREE.Vector3(x, y, z));
+-    }
++  for (const bucket of faceBuckets.values()) {
++    for (const face of bucket) {
++      surfaceFaceCount += 1;
++      const baseIndex = positions.length / 3;
++      const ratio = (face.mises - minMises) / range;
++      const color = face.color ? new THREE.Color(face.color) : colorForRatio(ratio);
++      const facePoints = [];
++      for (const label of face.ids) {
++        const node = nodeByLabel.get(label);
++        const point = pointOf(node);
++        const x = toFiniteNumber(point?.[0], 0);
++        const y = toFiniteNumber(point?.[1], 0);
++        const z = toFiniteNumber(point?.[2], 0);
++        facePoints.push([x, y, z]);
++        positions.push(x, y, z);
++        colors.push(color.r, color.g, color.b);
++        bounds.expandByPoint(probe.set(x, y, z));
++      }
++
++      if (face.ids.length === 3) {
++        indices.push(baseIndex, baseIndex + 1, baseIndex + 2);
++      } else {
++        indices.push(baseIndex, baseIndex + 1, baseIndex + 2, baseIndex, baseIndex + 2, baseIndex + 3);
++      }
+ 
+-    if (face.labels.length === 3) {
+-      indices.push(baseIndex, baseIndex + 1, baseIndex + 2);
+-    } else {
+-      indices.push(baseIndex, baseIndex + 1, baseIndex + 2, baseIndex, baseIndex + 2, baseIndex + 3);
+-    }
+-
+-    if (face.showEdges) {
+-      for (let index = 0; index < face.labels.length; index += 1) {
+-        const aLabel = face.labels[index];
+-        const bLabel = face.labels[(index + 1) % face.labels.length];
+-        const edgeKey = faceKey([aLabel, bLabel]);
+-        if (linePairs.has(edgeKey)) {
+-          continue;
++      if (face.showEdges) {
++        for (let index = 0; index < face.ids.length; index += 1) {
++          const aLabel = face.ids[index];
++          const bLabel = face.ids[(index + 1) % face.ids.length];
++          const low = Math.min(aLabel, bLabel);
++          const high = Math.max(aLabel, bLabel);
++          let edgeSet = edgeBuckets.get(low);
++          if (!edgeSet) {
++            edgeSet = new Set();
++            edgeBuckets.set(low, edgeSet);
++          }
++          if (edgeSet.has(high)) {
++            continue;
++          }
++          edgeSet.add(high);
++          const aPoint = pointOf(nodeByLabel.get(aLabel));
++          const bPoint = pointOf(nodeByLabel.get(bLabel));
++          linePositions.push(
++            toFiniteNumber(aPoint?.[0], 0), toFiniteNumber(aPoint?.[1], 0), toFiniteNumber(aPoint?.[2], 0),
++            toFiniteNumber(bPoint?.[0], 0), toFiniteNumber(bPoint?.[1], 0), toFiniteNumber(bPoint?.[2], 0),
++          );
+         }
+-        linePairs.add(edgeKey);
+-        const a = nodeByLabel.get(aLabel);
+-        const b = nodeByLabel.get(bLabel);
+-        const aPoint = Array.isArray(a?.deformed) ? a.deformed : a?.coordinates;
+-        const bPoint = Array.isArray(b?.deformed) ? b.deformed : b?.coordinates;
+-        linePositions.push(
+-          toFiniteNumber(aPoint?.[0], 0), toFiniteNumber(aPoint?.[1], 0), toFiniteNumber(aPoint?.[2], 0),
+-          toFiniteNumber(bPoint?.[0], 0), toFiniteNumber(bPoint?.[1], 0), toFiniteNumber(bPoint?.[2], 0),
+-        );
++        appendInteriorGridLines(facePoints, surfaceGridSubdivisions, linePositions);
+       }
+-      appendInteriorGridLines(facePoints, surfaceGridSubdivisions, linePositions);
+     }
+   }
+ 
+@@ -297,6 +415,13 @@
+   const lineGeometry = new THREE.BufferGeometry();
+   lineGeometry.setAttribute("position", new THREE.Float32BufferAttribute(linePositions, 3));
+ 
++  if (typeof console !== "undefined") {
++    console.info(
++      `[cae-viewer] ${elements.length} elements -> ${surfaceFaceCount} boundary faces, ` +
++        `${positions.length / 3} vertices, ${linePositions.length / 6} edges`,
++    );
++  }
++
+   return {
+     bounds,
+     lineGeometry,
+@@ -393,7 +518,7 @@
+     if (!includeVisualOnly && node?.visualOnly) {
+       continue;
+     }
+-    const point = Array.isArray(node?.deformed) ? node.deformed : node?.coordinates;
++    const point = displacedPointOf(node, mesh?.deformationScale);
+     if (!Array.isArray(point)) {
+       continue;
+     }
+--- a/viewer/peridigm.jsx
++++ b/viewer/peridigm.jsx
+@@ -19,11 +19,8 @@
+ const button={padding:"10px 14px",border:"1px solid #94a9bd",borderRadius:7,cursor:"pointer",background:"white"};
+ 
+ function checkMesh(data) {
+-  if (data.representation!=="material-points" || !Array.isArray(data.nodes) || data.elements?.length) throw new Error("Requires material-point results without invented FE connectivity");
+-  const frames=data.dynamicFrames?.length ? data.dynamicFrames : [data];
+-  for (const frame of frames) {
+-    if (!frame.nodes?.length || frame.nodes.some(n=>!Array.isArray(n.coordinates)||n.coordinates.length!==3||!n.coordinates.every(Number.isFinite))) throw new Error("Invalid saved material-point coordinates");
+-  }
++  if (!data || !Array.isArray(data.nodes) || !data.nodes.length) throw new Error("Invalid result mesh: missing nodes");
++  if (data.representation==="material-points" && data.elements?.length) throw new Error("Material-point results must not invent FE connectivity");
+   return data;
+ }
+ 
+@@ -72,12 +69,12 @@
+     {!source&&<p style={panel}>选择一个已记录的真实算例即可回放。不需要 Peridigm 或 SSH。重新求解须配置模块的 CLI/MCP；本页的 Demo 按钮只读取已有结果。</p>}
+     <label style={{display:'block',margin:'14px 0'}}>或打开自己的 result_mesh.json <input aria-label="打开 Peridigm 结果" type="file" accept=".json" onChange={async e=>{try{const file=e.target.files?.[0];if(file)setSource({kind:'file',data:JSON.parse(await file.text())});}catch(err){setError(err.message);}}}/></label>
+     {loading&&<p role="status">正在加载真实保存帧…</p>}{error&&<p role="alert">{error}</p>}
+-    {mesh&&<><section style={{...panel,marginBottom:14}}><p><strong>{demo?'已计算结果回放 / Recorded replay':'已保存结果 / Saved result'}</strong> · {mesh.nodes.length.toLocaleString()} 个材料点 · {mesh.dynamicFrames?.length||1} 个展示时刻 · 位移比例 {mesh.deformationScale}</p><p>验证：{mesh.validation?.passed?'已通过此算例的数值检查':'未通过或未验证'}。网页不调用模型或求解器，不代表当前服务器运行状态。</p>{demo&&<p style={{display:'flex',gap:18,flexWrap:'wrap'}}><a href={demo.caseUrl}>参数与假设 JSON</a><a href={demo.csvUrl}>真实曲线 CSV</a><a href={demo.manifestUrl}>文件摘要</a></p>}</section>
++    {mesh&&<><section style={{...panel,marginBottom:14}}><p><strong>{demo?'已计算结果回放 / Recorded replay':'已保存结果 / Saved result'}</strong> · {mesh.representation==='material-points'?`${mesh.nodes.length.toLocaleString()} 个材料点`:`${mesh.nodes.length.toLocaleString()} 节点 / ${(mesh.elements?.length||0).toLocaleString()} 单元`} · {mesh.dynamicFrames?.length||1} 个展示时刻 · 位移比例 {mesh.deformationScale}</p><p>验证：{mesh.validation?.passed?'已通过此算例的数值检查':'未通过或未验证'}。网页不调用模型或求解器，不代表当前服务器运行状态。</p>{demo&&<p style={{display:'flex',gap:18,flexWrap:'wrap'}}><a href={demo.caseUrl}>参数与假设 JSON</a><a href={demo.csvUrl}>真实曲线 CSV</a><a href={demo.manifestUrl}>文件摘要</a></p>}</section>
+       {hasDamage&&<label style={{display:'block',marginBottom:12}}>显示场 <select aria-label="显示场" value={field} onChange={e=>setField(e.target.value)}><option value="damage">损伤 Damage（0–1）</option><option value="displacement">位移幅值（m）</option></select></label>}
+       <CaeResultViewer resultMesh={displayMesh} project={{outputs:{status:mesh.validation?.passed?'verified':'unverified'}}} locale="en"/>
+       {mesh.precrack&&<p style={{marginTop:14}}>初始预裂纹：x = −20 至 −10 mm，y = 0。它通过邻域过滤建立，初始 Damage 为零。新断键沿剩余邻域计算；连通前沿指标不是精确裂纹面。{source?.kind==='run'&&<> <a href="/run/report.html">查看当前运行报告</a></>}</p>}
+       <section aria-label="Verification metrics" style={{...panel,margin:'18px 0'}}><h2 style={{fontSize:20}}>验证摘要 / Verification</h2>{hasDamage?<p>新增断键：{metrics.new_broken_undirected_bonds?.toLocaleString()} 对；连通前沿推进指标：{(metrics.crack_extension_indicator_m*1000).toFixed(2)} mm；点损伤独立重建最大差：{metrics.max_point_damage_reconstruction_error}。</p>:<p>与 gold 位移最大差：{mesh.validation?.checks?.gold_displacement?.max_abs_difference} m；独立解析位移误差：{(metrics.max_analytic_displacement_relative_error*100).toFixed(4)}%。</p>}</section>
+-      {mesh.history?<section style={{display:'grid',gap:14}}><HistoryPlot title="实际新增断键数量" times={mesh.history.time} values={mesh.history.brokenBonds} unit="对"/><HistoryPlot title="连通裂纹前沿推进指标（非精确裂纹面）" times={mesh.history.time} values={mesh.history.crackFrontIndicatorX.map(x=>(x-mesh.precrack.tip_x_m)*1000)} unit="mm"/></section>:<HistoryPlot title="材料点 1 的实际 x 位移" times={mesh.dynamicFrames.map(f=>f.time)} values={mesh.dynamicFrames.map(f=>f.nodes[0].displacement[0])} unit="m"/>}
++      {mesh.history?<section style={{display:'grid',gap:14}}><HistoryPlot title="实际新增断键数量" times={mesh.history.time} values={mesh.history.brokenBonds} unit="对"/><HistoryPlot title="连通裂纹前沿推进指标（非精确裂纹面）" times={mesh.history.time} values={mesh.history.crackFrontIndicatorX.map(x=>(x-mesh.precrack.tip_x_m)*1000)} unit="mm"/></section>:mesh.dynamicFrames?.length?<HistoryPlot title="材料点 1 的实际 x 位移" times={mesh.dynamicFrames.map(f=>f.time)} values={mesh.dynamicFrames.map(f=>f.nodes[0].displacement[0])} unit="m"/>:null}
+       <section style={{...panel,marginTop:18}}><h2 style={{fontSize:20}}>适用范围与未验证项</h2><p>{mesh.validation?.scope}</p><ul>{Object.entries(mesh.validation?.not_verified||{}).map(([k,v])=><li key={k}>{k}: {v}</li>)}</ul><p>展示真实材料点，不虚构有限元连通、裂纹面或未计算的应力场。回放、数值一致性、实验验证是不同结论。</p></section>
+     </>}
+   </main>;
+--- a/viewer/README.md
++++ b/viewer/README.md
+@@ -15,6 +15,21 @@
+ 
+ `?result=/run/result_mesh.json` remains supported for a project-local, read-only run preview; loading a local result file is also supported. Demo replay never invokes a model or a solver. The shared viewer renders material points without invented FE elements and distinguishes Damage from displacement. See [Peridigm demo guide](../MCP/Peridigm/DEMO.md).
+ 
++### Finite-element results / 有限元结果
++
++The same page also renders 8-node hex FE results (`representation` absent, `elements` present), e.g. a
++CalculiX run exported with `MCP/CalculiX/tools/viewer_case.py`. Put the exported `result_mesh.json`
++under `dist/run/` and open:
++
++```text
++/peridigm.html?result=/run/result_mesh.json
++```
++
++Surface extraction keeps only boundary quadrilaterals; a 207k-element mesh collapses to 16,226 faces.
++`viewer/scripts/bench-surface.mjs` measures that step (integer bucket dedupe vs the older
++string-key dedupe: 188 ms vs 661 ms on the same mesh). Nodes may omit `deformed` — the viewer
++recomputes it from `coordinates + deformationScale * displacement`, which cuts the JSON by ~13%.
++
+ ### Portable static preview / 跨平台静态预览
+ 
+ After building, run the following from `viewer/` (use `python3` if your platform requires it):
