@@ -5,6 +5,8 @@
 - 仓库来历、上游差异、快速上手：见 [`README-CALCULIX.md`](README-CALCULIX.md)
 - 迁移数据/流程：见 [`migration/README.md`](migration/README.md) 与
   [`docs/calculix-ultrasonic-migration.md`](docs/calculix-ultrasonic-migration.md)
+- 2026-10-26 起另原样镜像上游 **Abaqus / ANSYS / COMSOL** 的 MCP 与 Skill（逐字节复制、
+  未做任何改动；见下方目录表与 `README-CALCULIX.md`）
 
 ## 目录
 
@@ -12,6 +14,10 @@
 | --- | --- | --- |
 | `MCP/CalculiX/` | ✅ | CalculiX MCP server、工具、示例、测试 |
 | `Skill/calculix/` | ✅ | 3 个 CalculiX 工作流技能 |
+| `MCP/Abaqus/`、`MCP/Abaqus（2020）/`、`MCP/abaqus mcp（2020）` | ✅ | 上游 Abaqus MCP 原样镜像 |
+| `MCP/Ansys/` | ✅ | 上游 ANSYS Fluent / Workbench / AEDT / PyAnsys MCP 原样镜像 |
+| `MCP/COMSOL/` | ✅ | 上游 COMSOL MCP 原样镜像 |
+| `Skill/abaqus/`、`Skill/Ansys/`、`Skill/comsol/` | ✅ | 上游对应技能原样镜像 |
 | `docs/` | ✅ | 工程笔记（Abaqus→CalculiX 迁移、TOF、可视化） |
 | `patches/viewer-fe-mesh/` | ✅ | 查看器支持 FE 网格的补丁与基准脚本 |
 | `migration/` | ✅ 代码 | 迁移脚本；`migration/results/` 是**本地结果**，被忽略 |

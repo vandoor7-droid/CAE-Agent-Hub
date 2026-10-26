@@ -1,15 +1,24 @@
 # CAE-Agent-Hub · CalculiX fork
 
-This fork keeps **only the CalculiX-related part** of
+This fork started as a **CalculiX-only** cut of
 [CAE-Agent-Hub](https://github.com/Cai-aa/CAE-Agent-Hub): the CalculiX MCP server,
 the CalculiX skills, the engineering notes from migrating an Abaqus ultrasonic
 model to CalculiX, and the viewer patches that were needed to display the result.
 
-The upstream repository carries several MCP servers (Peridigm, …), demo models
-and a material-point viewer; none of that is needed to run or inspect a CalculiX
-job, so it is not mirrored here.
+On 2026-10-26 it also gained **verbatim mirrors** of the upstream Abaqus, ANSYS
+and COMSOL MCP servers and skills. Those trees are copied byte-for-byte and are
+not modified here:
 
-## Layout
+```text
+MCP/Abaqus/  MCP/Abaqus（2020）/  MCP/abaqus mcp（2020）  MCP/Ansys/  MCP/COMSOL/
+Skill/abaqus/  Skill/Ansys/  Skill/comsol/
+```
+
+The rest of upstream — Peridigm, Adams, HyperWorks, CST, LAMMPS/OVITO, ANSA,
+FEP-Agent-Hub, the demo models and the material-point viewer — is still not
+mirrored.
+
+## Layout (CalculiX part)
 
 ```text
 MCP/CalculiX/            CalculiX MCP server (FastMCP), tools, examples, tests
