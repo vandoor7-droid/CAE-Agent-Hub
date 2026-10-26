@@ -1,0 +1,13 @@
+.env
+.venv/
+jobs/
+workbench_queue/
+__pycache__/
+*.pyc
+*.log
+*.err
+*.out
+*.rst
+*.db
+*.wbpj
+*.wbpz
