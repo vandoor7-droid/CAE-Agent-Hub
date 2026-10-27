@@ -35,6 +35,11 @@ def main() -> int:
     ap.add_argument("--ccx", default=r"D:\ccx_work\bin\ccx.exe")
     ap.add_argument("--jobs", type=int, default=6)
     ap.add_argument("--sources", type=int, nargs="+", default=list(range(1, 19)))
+    ap.add_argument("--chunked", action="store_true",
+                    help="run each *STEP of the deck as its own ccx job "
+                         "(crash-resumable; see run_segments.py)")
+    ap.add_argument("--fresh", action="store_true",
+                    help="with --chunked: ignore checkpoints and restart from segment 1")
     args = ap.parse_args()
 
     base = Path(args.base)
@@ -53,50 +58,69 @@ def main() -> int:
             print(f"[{name}] already done", flush=True)
             continue
         # a killed run leaves a partial .dat / restart file behind: never mistake
-        # that for a finished source, and always clear it before restarting
-        for suffix in (".dat", ".rout", ".rin", ".frd", ".sta", ".cvg", ".12d", ".stdout", ".done"):
-            stale = work / f"{name}{suffix}"
-            if stale.exists():
-                try:
-                    stale.unlink()
-                except OSError:
-                    pass
+        # that for a finished source, and always clear it before restarting --
+        # unless we are in chunked mode, where those files ARE the checkpoint
+        if not args.chunked or args.fresh:
+            for suffix in (".dat", ".rout", ".rin", ".frd", ".sta", ".cvg", ".12d", ".stdout", ".done"):
+                stale = work / f"{name}{suffix}"
+                if stale.exists():
+                    try:
+                        stale.unlink()
+                    except OSError:
+                        pass
         deck.write_text(rewrite(text, f"SENSOR_{src:02d}"), encoding="utf-8")
         pending.append((src, name, deck))
 
     print(f"{len(pending)} sources to run, {args.jobs} in parallel", flush=True)
-    running: list[tuple[int, str, subprocess.Popen, float]] = []
-    done: list[int] = []
-    queue = list(pending)
-    while queue or running:
-        while queue and len(running) < args.jobs:
-            src, name, deck = queue.pop(0)
-            log = (work / f"{name}.stdout").open("w", encoding="utf-8", errors="replace")
-            p = subprocess.Popen([args.ccx, "-i", name], cwd=str(work),
-                                 stdout=log, stderr=subprocess.STDOUT)
-            running.append((src, name, p, time.time()))
-            print(f"[{name}] started (pid {p.pid})", flush=True)
-        time.sleep(5)
-        still = []
-        for src, name, p, t0 in running:
-            rc = p.poll()
-            if rc is None:
-                still.append((src, name, p, t0))
-            else:
-                print(f"[{name}] rc={rc} in {time.time()-t0:.0f}s", flush=True)
-                if rc == 0:
-                    (work / f"{name}.done").write_text(
-                        f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\n", encoding="utf-8")
-                    # the restart file is ~570 MB per segment; nothing left to resume
-                    for suffix in (".rout", ".rin", ".frd"):
-                        junk = work / f"{name}{suffix}"
-                        if junk.exists():
-                            try:
-                                junk.unlink()
-                            except OSError:
-                                pass
-                done.append(src)
-        running = still
+    if args.chunked:
+        import run_segments
+        from concurrent.futures import ThreadPoolExecutor
+
+        def one(item):
+            src, name, deck = item
+            rc = run_segments.run_source(deck, work, name, ccx=args.ccx,
+                                         resume=not args.fresh)
+            print(f"[{name}] chunked rc={rc}", flush=True)
+            return src, rc
+
+        with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as ex:
+            results = list(ex.map(one, pending))
+        failed = [f"src{s:02d}" for s, rc in results if rc != 0]
+        if failed:
+            print(f"failed sources: {failed}", file=sys.stderr, flush=True)
+    else:
+        running: list[tuple[int, str, subprocess.Popen, float]] = []
+        done: list[int] = []
+        queue = list(pending)
+        while queue or running:
+            while queue and len(running) < args.jobs:
+                src, name, deck = queue.pop(0)
+                log = (work / f"{name}.stdout").open("w", encoding="utf-8", errors="replace")
+                p = subprocess.Popen([args.ccx, "-i", name], cwd=str(work),
+                                     stdout=log, stderr=subprocess.STDOUT)
+                running.append((src, name, p, time.time()))
+                print(f"[{name}] started (pid {p.pid})", flush=True)
+            time.sleep(5)
+            still = []
+            for src, name, p, t0 in running:
+                rc = p.poll()
+                if rc is None:
+                    still.append((src, name, p, t0))
+                else:
+                    print(f"[{name}] rc={rc} in {time.time()-t0:.0f}s", flush=True)
+                    if rc == 0:
+                        (work / f"{name}.done").write_text(
+                            f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\n", encoding="utf-8")
+                        # the restart file is ~570 MB per segment; nothing left to resume
+                        for suffix in (".rout", ".rin", ".frd"):
+                            junk = work / f"{name}{suffix}"
+                            if junk.exists():
+                                try:
+                                    junk.unlink()
+                                except OSError:
+                                    pass
+                    done.append(src)
+            running = still
 
     merged = work / "tof_ccx_all.csv"
     rows_all = []

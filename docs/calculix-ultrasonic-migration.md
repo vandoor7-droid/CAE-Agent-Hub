@@ -63,29 +63,63 @@ PaStiX 稀疏直接求解器——不报错、不警告，只是突然变慢并�
 
 ## 4. 断点续算
 
-ccx 的 `*RESTART` 是 **step 粒度**的：
+ccx 的 `*RESTART` 是 **step 粒度**的：`*RESTART, WRITE` 在每步结束时把状态写进 `<job>.rout`，
+续算用 `*RESTART, READ, STEP=k`，而且这行必须是新 deck 的**第一行**——模型（节点/单元/材料/载荷）
+从 `.rin` 读回来，deck 里只留剩余的 step。作业名可以不同，但要把上一段的 `<job>.rout`
+复制成新作业名的 `<newjob>.rin`。
 
-```text
-*RESTART, WRITE, FREQUENCY=1     # 写在 *STEP 内，每步结束把状态写进 <job>.rout
-...
-*RESTART, READ, STEP=k           # 续算 deck 的**第一行**，读 <job>.rin
+### 4.1 推荐用法：一段一个进程
+
+显式动力学里 `.sta` 是空表，`.dat` 也分不清"这一段跑完了"还是"被杀在半段"，唯一可靠的完成信号是
+**进程退出码**。所以正常流程让驱动按段起进程：
+
+```bash
+# 18 源扫描开着分段落盘；中断后把同一条命令再跑一遍，就从下一段继续
+python scripts/run_parallel.py --base .../Z00_coarse_tof8.inp --work .../campaign \
+    --jobs 4 --sources 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 --chunked
+
+# 单源续跑 / 调试
+python scripts/run_segments.py --deck .../Z00_coarse_tof8.inp --work .../campaign --name src02
 ```
 
-续算时作业名可以不同，但必须把上一次的 `<job>.rout` **改名**成新作业名的 `<newjob>.rin`。
+- 进度写在 `<work>/<name>.progress.json`（`completed` / `active` / `segments`）；
+- 每段成功后保留 `<name>_seg{k}.rout`，启动下一段时复制成 `<name>_seg{k+1}.rin`；
+- 被杀时当前段作废、`completed` 不变，重跑从 `completed+1` 开始 —— **最多丢一段**；
+- 全部段成功后把 `<name>_seg*.dat` 合并成 `<name>.dat`（时间轴是绝对时间，直接拼接），写 `.done`，
+  再删段级 `.inp/.dat/.rout`；
+- `--fresh` 忽略检查点从第 1 段重来。
 
-一个 `*STEP` 跑满整个 0.22 ms 的写法拿不到中途检查点，所以要主动切段：
+段长在 `make_ccx_inp.py` 里控制：
 
-1. 把 `[0, T]` 均分成 N 段，每段一个 `*DYNAMIC` step，段内 `*RESTART, WRITE`；
+```bash
+--segments 8                                            # 均分 8 段
+--max-increments 190                                    # 每段不超过 N 个增量
+--checkpoint-minutes 10 --seconds-per-increment 3.2     # 按"最多丢 10 分钟墙钟"切
+```
+
+`--checkpoint-minutes` 用的是**墙钟**分钟，所以必须配实测的秒/增量（粗网 0.43、细网 3.2）；
+不能拿 `dt` 反算 —— `dt` 是仿真时间，不是计算时间。
+
+### 4.2 手工续算（原理）
+
+1. 把 `[0, T]` 切成 N 段，每段一个 `*DYNAMIC` step，段内 `*RESTART, WRITE`；
 2. 每段的 `*AMPLITUDE` 按**累计时间**平移（第 i 段的表取 `amp(t - t0)`），否则激励会在每段开头重放；
-3. `.dat` 的 time 是跨 step 累计的（实测 step1 0.1 µs … step4 2.0 µs），TOF 解析不需要加偏移。
+3. 续算 deck = `*RESTART, READ, STEP=k` + 其余段（不带模型）；
+4. `.dat` 的 time 是**绝对时间**，重启后不回零，所以合并历史不需要加偏移。
 
-实测验证（25 增量、5 段 vs 一次跑完）：
+### 4.3 实测
 
-- 分段与单段的逐增量位移差 `max|Δu| = 4.6e-23 mm`（相对 6.4e-17，机器精度）；
-- 跑完前 2 段后改名 `.rin`、以 `*RESTART, READ, STEP=2` 续完 3 段，末态与一次跑完**完全相同**。
+| 检查 | 结果 |
+| --- | --- |
+| 分段 vs 单段末态（25 增量、5 段） | max\|Δu\| = 4.6e-23 mm（机器精度） |
+| 手工 READ 续算末态 | 与一次跑完完全相同 |
+| `.dat` 时间轴（tB 末 1.0e-6 → tC 首 1.1e-6） | 连续，不回零 |
+| chunked 4 段 vs 单进程 1,600 增量 | max\|Δu\| = 0（625 节点全等） |
+| 真机：粗网 src02 第 2 段后杀进程 → `--chunked` 续跑 | 17 条 TOF 与不中断结果**逐条一致**（max\|ΔTOF\| = 0.0000 µs），末态位移 max\|Δu\| = 0 |
 
-代价：`.rout` 很大，215k 节点的粗网约 **570 MB/段**（8 段约 4.5 GB）。作业跑完要删掉，
-否则 18 个源的扫描会占掉几十 GB。段数建议 8：每 ~2.5 min 一个检查点，网格重读的额外开销约 13%。
+代价：`.rout` 粗网 ≈570 MB/段（215k 节点）、细网 ≈2.9 GB/段，总大小随总时长线性增长
+（细网 3,045 增量实测 9 GB）；多一段就多读一次网格，8 段时额外开销约 13%，段数太多（>20）
+重读开销会明显上升 —— 按"能接受丢多少分钟"取段长即可。
 
 ## 5. 时间历史与 TOF
 

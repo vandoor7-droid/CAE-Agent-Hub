@@ -66,6 +66,15 @@ def main() -> int:
     ap.add_argument("--time", default="3.e-4")
     ap.add_argument("--segments", type=int, default=1,
                     help="split the run into N *DYNAMIC steps with *RESTART,WRITE (checkpointing)")
+    ap.add_argument("--max-increments", type=int, default=0,
+                    help="checkpoint size: at most N increments per *DYNAMIC step "
+                         "(alternative to --segments)")
+    ap.add_argument("--checkpoint-minutes", type=float, default=0.0,
+                    help="checkpoint loss budget in WALL-CLOCK minutes; requires "
+                         "--seconds-per-increment")
+    ap.add_argument("--seconds-per-increment", type=float, default=0.0,
+                    help="measured wall time per increment (5 mm mesh ~0.43 s, "
+                         "2.5 mm mesh ~3.2 s); used with --checkpoint-minutes")
     ap.add_argument("--src", default="SRC")
     ap.add_argument("--amp", default="AMP_50K_5CYC")
     ap.add_argument("--amp-mag", default="1.e-4")
@@ -74,6 +83,14 @@ def main() -> int:
     ap.add_argument("--print-freq", default="")
     ap.add_argument("--file-freq", default="60")
     args = ap.parse_args()
+
+    if args.max_increments and args.checkpoint_minutes:
+        ap.error("--max-increments and --checkpoint-minutes are alternatives, pick one")
+    if args.checkpoint_minutes and args.seconds_per_increment <= 0:
+        ap.error("--checkpoint-minutes needs --seconds-per-increment "
+                 "(coarse 5 mm ~0.43 s/inc, fine 2.5 mm ~3.2 s/inc)")
+    if (args.max_increments or args.checkpoint_minutes) and args.segments != 1:
+        ap.error("give either --segments N or the checkpoint options, not both")
 
     src = Path(args.inp)
     out = Path(args.out)
@@ -197,10 +214,33 @@ def main() -> int:
         part_nsets.extend(auto)
         sensor_ids = sorted(int(d[0].strip(",")) for _, _, d in auto)
 
+    total_time = float(args.time)
+    dt = float(args.dt)
+    n_inc_total = max(1, int(round(total_time / dt)))
+    if args.max_increments:
+        inc_per_seg = max(1, int(args.max_increments))
+    elif args.checkpoint_minutes:
+        inc_per_seg = max(1, int(round(
+            args.checkpoint_minutes * 60.0 / args.seconds_per_increment)))
+    else:
+        inc_per_seg = max(1, n_inc_total // max(1, int(args.segments)))
+    seg_incs = [inc_per_seg] * (n_inc_total // inc_per_seg)
+    remainder = n_inc_total - sum(seg_incs)
+    if remainder:
+        seg_incs.append(remainder)
+    n_seg = len(seg_incs)
+    if n_seg > 5000:
+        raise SystemExit(f"would create {n_seg} segments; loosen the checkpoint size")
+    if args.max_increments or args.checkpoint_minutes:
+        print(f"checkpointing: {n_seg} segments x <= {inc_per_seg} increments "
+              f"(last {seg_incs[-1]})")
+
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="utf-8", newline="\n") as f:
         f.write("*HEADING\n")
         f.write("Z00 base model for CalculiX (converted from Abaqus export)\n")
+        f.write(f"** CHECKPOINT SEGMENTS={n_seg} INC_PER_SEG={inc_per_seg} "
+                f"DT={args.dt} T={args.time}\n")
         f.write("*PREPRINT, ECHO=NO, MODEL=NO, HISTORY=NO, CONTACT=NO\n")
         f.write("*NODE\n")
         f.writelines(l + "\n" for l in node_lines)
@@ -267,24 +307,18 @@ def main() -> int:
                     out.append(p)
             return out
 
-        total_time = float(args.time)
-        dt = float(args.dt)
-        n_seg = max(1, int(args.segments))
-        seg_time = total_time / n_seg
-        n_inc_total = int(round(total_time / dt))
-        inc_per_seg = max(1, n_inc_total // n_seg)
         pairs = parse_pairs(amplitude)
         freq = f", FREQUENCY={args.print_freq}" if str(args.print_freq).strip() else ""
 
-        for seg in range(n_seg):
-            t0 = seg * seg_time
-            t1 = total_time if seg == n_seg - 1 else (seg + 1) * seg_time
+        t0 = 0.0
+        for seg, n_inc in enumerate(seg_incs):
+            t1 = total_time if seg == n_seg - 1 else t0 + n_inc * dt
             amp_name = f"{args.amp}_S{seg + 1}"
             pts = segment_points(pairs, t0, t1)
             f.write(f"*AMPLITUDE, NAME={amp_name}\n")
             for t, v in pts:
                 f.write(f"{t:.10e}, {v:.10e}\n")
-            f.write(f"*STEP, NAME=SEG{seg + 1}, NLGEOM=NO, INC={inc_per_seg + 10}\n")
+            f.write(f"*STEP, NAME=SEG{seg + 1}, NLGEOM=NO, INC={n_inc + 10}\n")
             f.write("*DYNAMIC, DIRECT, EXPLICIT=2\n")
             f.write(f"{args.dt}, {t1 - t0:.10e}\n")
             if n_seg > 1:
@@ -301,6 +335,7 @@ def main() -> int:
                 f.write(f"*NODE FILE, FREQUENCY={args.file_freq}\n")
                 f.write("U\n")
             f.write("*END STEP\n")
+            t0 = t1
 
     print(f"wrote {out} ({out.stat().st_size/1e6:.1f} MB)")
     print(f"nodes={n_nodes} elements={n_elems} sensors={len(sensor_ids)}")
