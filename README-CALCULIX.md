@@ -1,5 +1,8 @@
 # CAE-Agent-Hub · CalculiX fork
 
+- GitHub: <https://github.com/vandoor7-droid/CAE-Agent-Hub> (branch `calculix`)
+- Gitee mirror: <https://gitee.com/vandoor2/CAE-Agent-Hub> (branch `calculix`, same commits)
+
 This fork started as a **CalculiX-only** cut of
 [CAE-Agent-Hub](https://github.com/Cai-aa/CAE-Agent-Hub): the CalculiX MCP server,
 the CalculiX skills, the engineering notes from migrating an Abaqus ultrasonic

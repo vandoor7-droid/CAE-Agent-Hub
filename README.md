@@ -1,6 +1,8 @@
 # 工作区索引 · CalculiX fork
 
 这个目录既是 DSH 工作区，也是 `vandoor7-droid/CAE-Agent-Hub` 的 `calculix` 分支本地仓库。
+- GitHub：<https://github.com/vandoor7-droid/CAE-Agent-Hub>
+- Gitee 镜像：<https://gitee.com/vandoor2/CAE-Agent-Hub>（同一分支、同一提交号）
 
 - 仓库来历、上游差异、快速上手：见 [`README-CALCULIX.md`](README-CALCULIX.md)
 - 迁移数据/流程：见 [`migration/README.md`](migration/README.md) 与
