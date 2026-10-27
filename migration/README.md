@@ -17,13 +17,14 @@ MCP 工具在 [`../MCP/CalculiX/`](../MCP/CalculiX/)，技能在 [`../Skill/calc
 | 路径 | 内容 |
 | --- | --- |
 | `scripts/make_ccx_inp.py` | Abaqus 导出 deck → 扁平 CalculiX deck（分段、自动匹配传感器、`--frd-mode`） |
-| `scripts/run_parallel.py` | 多源并行跑 TOF 算例，合并 `tof_ccx_all.csv`（带 `.done` 断点标记） |
+| `scripts/run_parallel.py` | 多源并行跑 TOF 算例，合并 `tof_ccx_all.csv`（带 `.done` 断点标记；`--chunked` 按段跑、可续算） |
+| `scripts/run_segments.py` | 分段执行器：一个 `*STEP` 一个 ccx 进程，`progress.json` 记进度，中断后从下一段续跑 |
 | `scripts/run_campaign.py` | 单线程旧版扫源脚本（保留作参考） |
 | `scripts/parse_dat_history.py` | 解析 `.dat` 时间历程，检测首到（TOF） |
 | `scripts/compare_tof.py` | 与 Abaqus 参考逐路径对照，输出 markdown 报告 |
 | `scripts/frd_to_dat.py` | `.frd` → 帧数据 |
 | `scripts/export_viewer_case.py` | 导出查看器用 `result_mesh.json` |
-| `scripts/restart_probe.py` | 断点续算可行性探针 |
+| `scripts/restart_probe.py` | 断点续算回归探针（`--verify`：末态一致 + `.dat` 时间轴连续） |
 | `scripts/clean_intermediates.py` | 清理 `.rout/.frd/.inp` 等大件中间文件 |
 | `results/` | **本地**：`src01/`、`all/`、`fine/` 的 csv 与对照报告 |
 
@@ -31,7 +32,7 @@ MCP 工具在 [`../MCP/CalculiX/`](../MCP/CalculiX/)，技能在 [`../Skill/calc
 
 ```bash
 # 0. 参考数据（Abaqus 306 条路径）
-#    D:\文档\木结构超声仿真_20260809\tof\Z00_tof.csv
+#    <项目目录>/tof/Z00_tof.csv
 
 # 1. 粗网 8 段 TOF deck（5 mm，21.6 万节点 / 20.7 万单元）
 python scripts/make_ccx_inp.py D:/ccx_work/z00/Z00_coarse.inp \
@@ -43,7 +44,7 @@ python scripts/run_parallel.py --base D:/ccx_work/z00/Z00_coarse_tof8.inp \
     --work D:/ccx_work/z00/campaign --jobs 4 --sources 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18
 
 # 3. 对照
-python scripts/compare_tof.py --ref "D:/文档/木结构超声仿真_20260809/tof/Z00_tof.csv" \
+python scripts/compare_tof.py --ref "<项目目录>/tof/Z00_tof.csv" \
     --ccx D:/ccx_work/z00/campaign/tof_ccx_all.csv --out results/all/compare_all.md
 
 # 4. 2.5 mm 细网单源校核（dt 取粗网临界步长的一半；4 段）
@@ -55,6 +56,19 @@ python scripts/run_parallel.py --base D:/ccx_work/z00/Z00_fine_tof4.inp \
 
 # 5. 清中间件（默认 dry-run，确认后加 --apply）
 python scripts/clean_intermediates.py D:/ccx_work/z00/campaign
+
+# 6. 断点续算：中断后把同一条命令再跑一遍即可
+python scripts/run_parallel.py --base D:/ccx_work/z00/Z00_coarse_tof8.inp \
+    --work D:/ccx_work/z00/campaign --jobs 1 --sources 2 --chunked
+python scripts/run_segments.py --deck D:/ccx_work/z00/Z00_coarse_tof8.inp \
+    --work D:/ccx_work/z00/campaign --name src02        # 单源调试/续跑
+python scripts/restart_probe.py --verify                 # 回归：末态一致 + 时间轴连续
+
+# 段长控制（默认 --segments N；也可以按增量数或"最多丢几分钟"切）
+python scripts/make_ccx_inp.py in.inp out.inp --dt 6.3e-8 --time 2.2e-4 \
+    --max-increments 190 --src SRC --frd-mode none --print-freq 1
+python scripts/make_ccx_inp.py in.inp out.inp --dt 6.3e-8 --time 2.2e-4 \
+    --checkpoint-minutes 10 --seconds-per-increment 3.2 --src SRC --frd-mode none --print-freq 1
 ```
 
 ## 产物与体积（决定什么时候清）

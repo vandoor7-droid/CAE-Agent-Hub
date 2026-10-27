@@ -23,7 +23,7 @@
 | `migration/` | ✅ 代码 | 迁移脚本；`migration/results/` 是**本地结果**，被忽略 |
 | `.dsh/` | ❌ | 本机 DSH 配置：`mcp.yml`（calculix MCP）、`skills/`（技能副本） |
 | `.local/` | ❌ | 本机工具与临时清单（gh 推送助手、清理脚本、manifest） |
-| `每周总结/` | ❌ | 每周总结归档（个人文件，不随仓库走） |
+| 本地个人归档 | ❌ | 个人文件（忽略规则在 `.git/info/exclude`，不随仓库走） |
 
 ## 本地环境要点
 

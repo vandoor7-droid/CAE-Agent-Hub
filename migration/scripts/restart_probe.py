@@ -10,12 +10,13 @@ Then compares the final displacements of tA against tB+tC.
 """
 from __future__ import annotations
 
+import argparse
 import re
 import subprocess
 import sys
 from pathlib import Path
 
-EX = Path(r"D:\文档\木结构超声仿真_20260809\迁移任务3_CalculiX_20261023\hub\MCP\CalculiX\examples\cantilever.inp")
+EX = Path(__file__).resolve().parents[2] / "MCP" / "CalculiX" / "examples" / "cantilever.inp"
 WORK = Path(r"D:\ccx_work\restart_probe")
 CCX = r"D:\ccx_work\bin\ccx.exe"
 DT = "1.e-7"
@@ -66,7 +67,22 @@ def run(name: str) -> int:
     return rc
 
 
+def read_times(dat: Path) -> list[float]:
+    out = []
+    for line in dat.read_text(encoding="utf-8", errors="replace").splitlines():
+        if "for set" in line and " and time " in line:
+            try:
+                out.append(float(line.rsplit("time", 1)[1]))
+            except ValueError:
+                pass
+    return out
+
+
 def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--verify", action="store_true",
+                    help="CI mode: assert state equality and .dat time continuity")
+    args = ap.parse_args()
     WORK.mkdir(parents=True, exist_ok=True)
     src = EX.read_text(encoding="utf-8")
     head = header(src)
@@ -103,7 +119,20 @@ def main() -> int:
     diff = max((max(abs(last_a[n][i] - last_c[n][i]) for i in range(3)) for n in common), default=float("nan"))
     scale = max((abs(v) for d in last_a.values() for v in d), default=1.0)
     print(f"nodes compared={len(common)}  max|du|={diff:.3e} mm  (max|u|={scale:.3e})  ratio={diff / scale:.3e}")
-    return 0
+
+    # The .dat history must continue on the absolute time axis after a restart,
+    # otherwise merging segment histories would need per-segment offsets.
+    tb, tc = read_times(WORK / "tB.dat"), read_times(WORK / "tC.dat")
+    ok_time = bool(tb) and bool(tc) and abs(tc[0] - (tb[-1] + float(DT))) < 0.05 * float(DT)
+    print(f"time axis: tB last={tb[-1]:.3e}  tC first={tc[0]:.3e}  "
+          f"dt={float(DT):.1e}  continuous={ok_time}")
+
+    if not args.verify:
+        return 0
+    ok_state = bool(common) and diff / scale < 1e-12
+    print(f"verify: state_equal={ok_state}  time_continuous={ok_time}  "
+          f"-> {'PASS' if ok_state and ok_time else 'FAIL'}")
+    return 0 if ok_state and ok_time else 1
 
 
 if __name__ == "__main__":
